@@ -20,15 +20,9 @@
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
 
-// Provide VERSION_CODE for ESPHome versions lacking it, as existence checking doesn't work for function-like macros
-#ifndef VERSION_CODE
-#define VERSION_CODE(major, minor, patch) ((major) << 16 | (minor) << 8 | (patch))
-#endif
-
 #include <memory>
 #include <string>
 #include <vector>
-#include <Stream.h>
 
 #ifdef ARDUINO_ARCH_ESP8266
 #include <ESPAsyncTCP.h>
@@ -38,44 +32,54 @@
 #include <AsyncTCP.h>
 #endif
 
-#if ESPHOME_VERSION_CODE >= VERSION_CODE(2021, 10, 0)
-using SSStream = esphome::uart::UARTComponent;
-#else
-using SSStream = Stream;
-#endif
+using esphome::uart::UARTComponent;
+
+using SendCb = std::function<void(const std::vector<uint8_t> &)>;
+using OnUartDataCb = std::function<void(const std::vector<uint8_t> &, SendCb)>;
+
+void onData(const std::vector<uint8_t> &input, SendCb send) {
+  static std::vector<uint8_t> buf;
+  for (uint8_t x : input) {
+    const size_t idx = buf.size();
+    if (idx == 0 && x != 0xAA)
+      continue;
+    if (idx == 1 && x < 10) {
+      buf.clear();
+      continue;
+    }
+    buf.push_back(x);
+    if (idx < 10 || idx != buf[1])
+      continue;
+    uint8_t cs = 0xAA;
+    for (uint8_t b : buf)
+      cs -= b;
+    if (cs == 0)
+      send(buf);
+    buf.clear();
+  }
+}
 
 class StreamServerComponent : public esphome::Component {
-public:
-    StreamServerComponent() = default;
-    explicit StreamServerComponent(SSStream *stream) : stream_{stream} {}
-    void set_uart_parent(esphome::uart::UARTComponent *parent) { this->stream_ = parent; }
+ public:
+  StreamServerComponent() = default;
+  explicit StreamServerComponent(UARTComponent *uart) : uart_{uart} {}
+  void set_uart_parent(UARTComponent *uart) { this->uart_ = uart; }
 
-    void setup() override;
-    void loop() override;
-    void dump_config() override;
-    void on_shutdown() override;
+  float get_setup_priority() const override { return esphome::setup_priority::AFTER_WIFI; }
+  void setup() override;
+  void loop() override;
+  void dump_config() override;
+  void on_shutdown() override;
 
-    float get_setup_priority() const override { return esphome::setup_priority::AFTER_WIFI; }
+  void bind(uint16_t port);
+  void on_uart_data(OnUartDataCb cb) { this->on_uart_data_cb_ = cb; }
 
-    void set_port(uint16_t port) { this->port_ = port; }
+ protected:
+  void cleanup();
+  void read();
 
-protected:
-    void cleanup();
-    void read();
-    void write();
-
-    struct Client {
-        Client(AsyncClient *client, std::vector<uint8_t> &recv_buf);
-        ~Client();
-
-        AsyncClient *tcp_client{nullptr};
-        std::string identifier{};
-        bool disconnected{false};
-    };
-
-    SSStream *stream_{nullptr};
-    AsyncServer server_{0};
-    uint16_t port_{6638};
-    std::vector<uint8_t> recv_buf_{};
-    std::vector<std::unique_ptr<Client>> clients_{};
+  AsyncServer server_{0};
+  UARTComponent *uart_{nullptr};
+  OnUartDataCb on_uart_data_cb_{nullptr};
+  std::vector<AsyncClient *> clients_{};
 };
